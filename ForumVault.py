@@ -380,15 +380,19 @@ async def favorite_message(
     await ensure_user(interaction)
     ephemeral = is_private_context(interaction)
 
+    # 先 defer，避免 is_forum_thread() 的网络请求 + 数据库查询
+    # 耗时超过 3 秒导致 interaction token 失效（Unknown interaction）。
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+
     if not await is_forum_thread(message):
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ 这个消息不属于 Discord Forum 帖子。",
             ephemeral=ephemeral,
         )
         return
 
     if interaction.guild is None:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ 收藏帖子必须来自服务器。",
             ephemeral=True,
         )
@@ -435,7 +439,7 @@ async def favorite_message(
         )
         color = discord.Color.blurple()
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=discord.Embed(
             title=title,
             description=text,
@@ -452,15 +456,18 @@ async def unfavorite_message(
     await ensure_user(interaction)
     ephemeral = is_private_context(interaction)
 
+    # 同样先 defer，理由与 favorite_message 中一致。
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+
     if not await is_forum_thread(message):
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ 这个消息不属于 Discord Forum 帖子。",
             ephemeral=ephemeral,
         )
         return
 
     if interaction.guild is None:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ 取消收藏必须来自服务器。",
             ephemeral=True,
         )
@@ -485,7 +492,7 @@ async def unfavorite_message(
         else "ℹ️ 你还没有收藏这个帖子。"
     )
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         text,
         ephemeral=ephemeral,
     )
@@ -659,11 +666,35 @@ def favorites_embed(
                 f"　收藏时间：`{created}`"
             )
 
-        embed.add_field(
-            name="",
-            value="\n\n".join(lines),
-            inline=False,
-        )
+        # Discord 单个 embed field 的 value 上限是 1024 字符。
+        # PER_PAGE 条目拼在一起可能超出该限制，因此这里按长度
+        # 拆分成多个 field，而不是硬塞进同一个 field 导致 400。
+        MAX_FIELD_LEN = 1024
+        chunk_lines: list[str] = []
+        chunk_len = 0
+
+        def flush_chunk() -> None:
+            if chunk_lines:
+                embed.add_field(
+                    name="",
+                    value="\n\n".join(chunk_lines),
+                    inline=False,
+                )
+
+        for line in lines:
+            # +2 对应拼接时使用的 "\n\n"
+            added_len = len(line) + (2 if chunk_lines else 0)
+
+            if chunk_len + added_len > MAX_FIELD_LEN:
+                flush_chunk()
+                chunk_lines = []
+                chunk_len = 0
+                added_len = len(line)
+
+            chunk_lines.append(line)
+            chunk_len += added_len
+
+        flush_chunk()
 
     embed.set_footer(text=f"第 {page + 1} / {pages} 页")
     return embed
